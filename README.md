@@ -95,3 +95,10 @@ You should see something similar to the following:
 ```
 {"enabled": "yes","port": 20566, "txrate": 1, "txcount": 59, "errcount": 0, "interfaces":, "eth0" }
 ```
+
+## Controlling Operation
+
+You can control operation of UDPt at any time by changing
+the values of its configuration parameters at runtime.
+It is not necessary to restart the application to effect
+the changes.
