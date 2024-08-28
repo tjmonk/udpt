@@ -83,6 +83,10 @@ SOFTWARE.
 #define MAX_UDPT_SIZE ( 1472 )
 #endif
 
+#ifndef IPADDR_SIZE
+#define IPADDR_SIZE ( 128 )
+#endif
+
 /*! UDP Template Engine state object */
 typedef struct _udptState
 {
@@ -121,6 +125,15 @@ typedef struct _udptState
 
     /*! enable/disable variable name */
     char *enableVarName;
+
+    /*! IP Address variable handle */
+    VAR_HANDLE hIPAddr;
+
+    /*! IP Address */
+    char IPAddr[IPADDR_SIZE];
+
+    /*! IP Address variable name */
+    char *ipAddrVarName;
 
     /*! enable/disable variable handle */
     VAR_HANDLE hEnable;
@@ -237,6 +250,7 @@ static void RunMessageHandler( UDPTState *pState );
 static int ProcessModified( UDPTState *pState, VAR_HANDLE hVar );
 static int ProcessTimer( UDPTState *pState );
 static int ProcessTemplate( UDPTState *pState );
+static int UpdateInterfaceIP( UDPTState *pState, struct ifaddrs *ifa );
 static int SendOutput( UDPTState *pState );
 static int SendUDP( int family,
                     struct sockaddr *pSockAddr,
@@ -340,7 +354,17 @@ int main(int argc, char **argv)
             NOTIFY_PRINT,
             &(state.hMetrics),
             (void *)(&state.metrics),
-            NULL }
+            NULL },
+
+        {   &state.ipAddrVarName,
+            VARFLAG_VOLATILE,
+            VARTYPE_STR,
+            IPADDR_SIZE,
+            NOTIFY_NONE,
+            &(state.hIPAddr),
+            (void *)(&state.IPAddr),
+            NULL },
+
     };
 
     /* clear the UDP template engine state object */
@@ -462,7 +486,7 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvf:p:i:e:r:t:m:";
+    const char *options = "hvf:p:i:e:r:t:m:a:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -505,6 +529,10 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
 
                 case 'm':
                     pState->metricsVarName = strdup(optarg);
+                    break;
+
+                case 'a':
+                    pState->ipAddrVarName = strdup(optarg);
                     break;
 
                 default:
@@ -747,8 +775,8 @@ VAR_HANDLE SetupVar( VARSERVER_HANDLE hVarServer,
                     if ( result != EOK )
                     {
                         fprintf( stderr,
-                                "UDPT: Failed to set up notification for '%s'\n",
-                                info.name );
+                                 "UDPT: Failed to set up notification: '%s'\n",
+                                 info.name );
                     }
                 }
             }
@@ -1009,7 +1037,7 @@ static int ProcessTimer( UDPTState *pState )
     {
         if ( pState->enable == true )
         {
-            result = ProcessTemplate( pState );
+            result = SendOutput( pState );
         }
         else
         {
@@ -1121,15 +1149,12 @@ static int ProcessTemplate( UDPTState *pState )
                     {
                         /* generate the output payload */
                         result = TEMPLATE_FileToFile( pState->hVarServer,
-                                                    fd,
-                                                    pState->varFd );
+                                                      fd,
+                                                      pState->varFd );
                         if ( result == EOK )
                         {
                             /* NUL terminate the buffer */
                             Output( pState->varFd, "\0", 1 );
-
-                            /* send out the output */
-                            result = SendOutput( pState );
                         }
                         else
                         {
@@ -1277,69 +1302,150 @@ static int SendOutput( UDPTState *pState )
     struct ifaddrs *addrs;
     struct ifaddrs *ifa;
     int family;
-    int s;
-    char host[NI_MAXHOST];
     int rc;
     char *pName;
 
     if ( pState != NULL )
     {
-        /* get a handle to the output buffer */
-        pMsg = VARFP_GetData( pState->pVarFP );
-        if( pMsg != NULL )
+        /* get a list of the output interfaces */
+        if ( getifaddrs(&addrs) == 0 )
         {
-            /* get a list of the output interfaces */
-            if ( getifaddrs(&addrs) == 0 )
+            ifa = addrs;
+            for ( ifa = addrs; ifa != NULL; ifa = ifa->ifa_next )
             {
-                ifa = addrs;
-                for ( ifa = addrs; ifa != NULL; ifa = ifa->ifa_next )
+                if (ifa->ifa_addr == NULL)
+                        continue;
+
+                family = ifa->ifa_addr->sa_family;
+
+                /* only broadcast on AF_INET or AF_INET6 interfaces */
+                if ( ( family == AF_INET ) ||
+                     ( family == AF_INET6 ) )
                 {
-                    if (ifa->ifa_addr == NULL)
-                            continue;
-
-                    family = ifa->ifa_addr->sa_family;
-
-                    if ( ( family == AF_INET ) ||
-                         ( family == AF_INET6 ) )
+                    /* check against the interface allow list */
+                    if ( strlen( pState->interfaceList ) > 0 )
                     {
-                        /* check against the interface allow list */
-                        if ( strlen( pState->interfaceList ) > 0 )
+                        pName = strstr( pState->interfaceList,
+                                        ifa->ifa_name );
+                        if ( pName == NULL )
                         {
-                            pName = strstr( pState->interfaceList,
-                                            ifa->ifa_name );
-                            if ( pName == NULL )
-                            {
-                                /* not sending on this interface */
-                                continue;
-                            }
+                            /* not sending on this interface */
+                            continue;
                         }
+                    }
 
-                        /* send out a UDP message */
-                        rc = SendUDP( family,
-                                      ifa->ifa_broadaddr,
-                                      pState->port,
-                                      pMsg,
-                                      strlen( pMsg ) );
-                        if ( rc == EOK )
+                    /* update the interface we are processing */
+                    UpdateInterfaceIP( pState, ifa );
+
+                    /* process the template */
+                    result = ProcessTemplate( pState );
+                    if ( result == EOK )
+                    {
+                        /* get a pointer to the rendered template output */
+                        pMsg = VARFP_GetData( pState->pVarFP );
+                        if ( pMsg != NULL )
                         {
-                            pState->txcount++;
+                            /* send out a UDP message */
+                            rc = SendUDP( family,
+                                        ifa->ifa_broadaddr,
+                                        pState->port,
+                                        pMsg,
+                                        strlen( pMsg ) );
+                            if ( rc == EOK )
+                            {
+                                pState->txcount++;
+                            }
+                            else
+                            {
+                                pState->errcount++;
+                            }
                         }
                         else
                         {
                             pState->errcount++;
                         }
                     }
+                    else
+                    {
+                        pState->errcount++;
+                    }
                 }
+            }
 
-                if ( addrs != NULL )
-                {
-                    freeifaddrs(addrs);
-                }
-            }
-            else
+            if ( addrs != NULL )
             {
-                result = errno;
+                freeifaddrs(addrs);
             }
+        }
+        else
+        {
+            result = errno;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  UpdateInterfaceIP                                                         */
+/*!
+    Update the interface IP address variable
+
+    The UpdateInterfaceIP function gets our IP address on the specified
+    interface and updates the IPAddress varserver variable referenced
+    by hIPAddr.
+
+    @param[in]
+        pState
+            pointer to the UDPTState object containing the varserver variable
+            reference to update
+
+    @param[in]
+        ifa
+            pointer to an interface address object
+
+    @retval EOK the IP address was successfully updated
+    @retval EINVAL invalid arguments
+    @retval other error from getnameinfo()
+
+==============================================================================*/
+static int UpdateInterfaceIP( UDPTState *pState, struct ifaddrs *ifa )
+{
+    int result = EINVAL;
+    VarObject obj;
+    char host[NI_MAXHOST];
+    int family;
+    int rc;
+
+    if ( ( pState != NULL ) &&
+         ( ifa != NULL ) )
+    {
+        family = ifa->ifa_addr->sa_family;
+
+        /* get our IP address on this interface */
+        rc = getnameinfo(ifa->ifa_addr,
+            (family == AF_INET) ? sizeof(struct sockaddr_in) :
+                                    sizeof(struct sockaddr_in6),
+            host,
+            NI_MAXHOST,
+            NULL,
+            0,
+            NI_NUMERICHOST );
+
+        if (rc == 0)
+        {
+            /* store the IP address on the varserver variable
+                so it may be included in the packet via the
+                template rendering mechanism */
+            obj.val.str = host;
+            obj.len = strlen( host );
+            obj.type = VARTYPE_STR;
+            result = VAR_Set(pState->hVarServer, pState->hIPAddr, &obj);
+        }
+        else
+        {
+            result = errno;
+            fprintf( stderr, "Failed to get host IP\n");
         }
     }
 
@@ -1572,7 +1678,7 @@ static int cbTrigger( UDPTState *pState )
     {
         if ( pState->enable == true )
         {
-            result = ProcessTemplate( pState );
+            result = SendOutput( pState );
         }
         else
         {

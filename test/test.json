@@ -1,1 +1,1 @@
-{"/sys/test/a": "${/sys/test/a}","/sys/test/b":"${/sys/test/b}"}
+{"/sys/udpt/ipaddr": "${/sys/udpt/ipaddr}", "/sys/test/a": "${/sys/test/a}","/sys/test/b":"${/sys/test/b}"}
