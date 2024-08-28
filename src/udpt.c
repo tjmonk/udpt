@@ -87,6 +87,10 @@ SOFTWARE.
 #define IPADDR_SIZE ( 128 )
 #endif
 
+#ifndef TEMPLATE_FILENAME_SIZE
+#define TEMPLATE_FILENAME_SIZE  ( 256 )
+#endif
+
 /*! UDP Template Engine state object */
 typedef struct _udptState
 {
@@ -147,9 +151,6 @@ typedef struct _udptState
     /*! handle to the interface list variable */
     VAR_HANDLE hInterfaceList;
 
-    /*! template filename */
-    char *pTemplateFilename;
-
     /*! interface list length */
     char interfaceList[INTERFACE_LIST_LEN];
 
@@ -170,6 +171,15 @@ typedef struct _udptState
 
     /*! metrics - unused - placeholder only */
     uint16_t metrics;
+
+    /*! name of the template file */
+    char templateFilename[TEMPLATE_FILENAME_SIZE];
+
+    /*! name of the template variable */
+    char *templateVarName;
+
+    /*! handle to the template file */
+    VAR_HANDLE hTemplate;
 
     /*! Variable Output stream */
     VarFP *pVarFP;
@@ -365,6 +375,15 @@ int main(int argc, char **argv)
             (void *)(&state.IPAddr),
             NULL },
 
+        {   &state.templateVarName,
+            VARFLAG_NONE,
+            VARTYPE_STR,
+            TEMPLATE_FILENAME_SIZE,
+            NOTIFY_MODIFIED,
+            &(state.hTemplate),
+            (void *)(&state.templateFilename),
+            NULL },
+
     };
 
     /* clear the UDP template engine state object */
@@ -449,10 +468,11 @@ static void usage( char *cmdname )
                  " [-v] : verbose mode variable\n"
                  " [-t] : trigger variable\n"
                  " [-r] : transmission rate variable\n"
-                 " [-f] : template file\n"
+                 " [-f] : template file variable\n"
                  " [-e] : enable/disable variable\n"
                  " [-i] : interface list variable\n"
                  " [-m] : metrics variable\n"
+                 " [-a] : source IP address variable (output)\n"
                  " [-h] : display this help\n",
                  cmdname );
     }
@@ -504,7 +524,7 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
                     break;
 
                 case 'f':
-                    pState->pTemplateFilename = strdup(optarg);
+                    pState->templateVarName = strdup(optarg);
                     break;
 
                 case 'p':
@@ -1138,9 +1158,9 @@ static int ProcessTemplate( UDPTState *pState )
     if ( pState != NULL )
     {
         /* open input template */
-        if ( pState->pTemplateFilename != NULL )
+        if ( strlen( pState->templateFilename ) > 0 )
         {
-            fd = open( pState->pTemplateFilename, O_RDONLY );
+            fd = open( pState->templateFilename, O_RDONLY );
             if ( fd != -1 )
             {
                 if ( pState->varFd > 0 )
@@ -1184,6 +1204,7 @@ static int ProcessTemplate( UDPTState *pState )
         else
         {
             fprintf( stderr, "No template specified\n");
+            result = ENOENT;
         }
     }
 
