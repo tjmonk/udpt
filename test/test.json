@@ -1,3 +1,1 @@
-{
-    "/sys/test/a": "${/sys/test/a}"
-}
+{"/sys/test/a": "${/sys/test/a}","/sys/test/b":"${/sys/test/b}"}

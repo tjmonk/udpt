@@ -59,6 +59,7 @@ SOFTWARE.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <linux/if_link.h>
@@ -84,6 +85,12 @@ SOFTWARE.
 /*! UDP Template Engine state object */
 typedef struct _udptState
 {
+    /*! variable definition list */
+    struct _varDef *pVarDef;
+
+    /*! count of variables */
+    size_t varCount;
+
     /*! variable server handle */
     VARSERVER_HANDLE hVarServer;
 
@@ -162,7 +169,7 @@ typedef struct _udptState
 typedef struct _varDef
 {
     /* name of the variable */
-    char *name;
+    char **name;
 
     /*! variable flags to be set */
     uint32_t flags;
@@ -181,6 +188,9 @@ typedef struct _varDef
 
     /*! pointer to store the variable value */
     void *pVal;
+
+    /*! callback function */
+    int (*cb)( UDPTState *pState );
 
 } VarDef;
 
@@ -207,6 +217,7 @@ VAR_HANDLE SetupVar( VARSERVER_HANDLE hVarServer,
                      size_t len,
                      uint32_t flags,
                      NotificationType notify );
+static int GetVar( VARSERVER_HANDLE hVarServer, VarDef *pVarDef );
 static int SetupVarFP( UDPTState *pState );
 static void RunMessageHandler( UDPTState *pState );
 static int ProcessModified( UDPTState *pState, VAR_HANDLE hVar );
@@ -215,12 +226,14 @@ static int ProcessTemplate( UDPTState *pState );
 static int SendOutput( UDPTState *pState );
 static int SendUDP( int family,
                     struct sockaddr *pSockAddr,
+                    int port,
                     char *pMsg,
                     size_t len );
 static int HandlePrintRequest( UDPTState *pState, int32_t id );
 static int PrintUDPTInfo( VAR_HANDLE hVar, UDPTState *pState, int fd );
 static int DumpStats( UDPTState *pState, int fd );
 static void Output( int fd, char *buf, size_t len );
+static int cbTrigger( UDPTState *pState );
 
 /*==============================================================================
         Private function definitions
@@ -249,9 +262,78 @@ static void Output( int fd, char *buf, size_t len );
 int main(int argc, char **argv)
 {
     int result = EINVAL;
+    VarDef vars[] =
+    {
+        {   &state.verboseVarName,
+            VARFLAG_NONE,
+            VARTYPE_UINT16,
+            0,
+            NOTIFY_MODIFIED,
+            &(state.hVerbose ),
+            (void *)&(state.verbose),
+            NULL },
+
+        {   &state.triggerVarName,
+            VARFLAG_VOLATILE | VARFLAG_TRIGGER,
+            VARTYPE_UINT16,
+            0,
+            NOTIFY_MODIFIED,
+            &(state.hTrigger ),
+            NULL,
+            cbTrigger },
+
+        {   &state.txRateVarName,
+            VARFLAG_NONE,
+            VARTYPE_UINT32,
+            0,
+            NOTIFY_MODIFIED,
+            &(state.hTxRate),
+            (void *)&(state.txrate_s),
+            NULL },
+
+        {   &state.enableVarName,
+            VARFLAG_NONE,
+            VARTYPE_UINT16,
+            0,
+            NOTIFY_MODIFIED,
+            &(state.hEnable),
+            (void *)(&state.enable),
+            NULL },
+
+        {   &state.interfaceVarName,
+            VARFLAG_NONE,
+            VARTYPE_STR,
+            INTERFACE_LIST_LEN,
+            NOTIFY_MODIFIED,
+            &(state.hInterfaceList),
+            (void *)(&state.interfaceList),
+            NULL },
+
+        {   &state.portVarName,
+            VARFLAG_NONE,
+            VARTYPE_UINT16,
+            0,
+            NOTIFY_MODIFIED,
+            &(state.hPort),
+            (void *)(&state.port),
+            NULL },
+
+        {   &state.metricsVarName,
+            VARFLAG_VOLATILE,
+            VARTYPE_UINT16,
+            0,
+            NOTIFY_PRINT,
+            &(state.hMetrics),
+            (void *)(&state.metrics),
+            NULL }
+    };
 
     /* clear the UDP template engine state object */
     memset( &state, 0, sizeof( state ) );
+
+    /* set up variable definition list */
+    state.pVarDef = vars;
+    state.varCount = sizeof(vars) / sizeof( vars[0]);
 
     /* process the command line options */
     ProcessOptions( argc, argv, &state );
@@ -346,7 +428,7 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvf:p:i:e:r:t:";
+    const char *options = "hvf:p:i:e:r:t:m:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -492,92 +574,37 @@ static int SetupVars( UDPTState *pState )
     int i;
     int n;
     VAR_HANDLE *pVarHandle;
+    VarDef *pVarDef;
 
     if ( pState != NULL )
     {
         VARSERVER_HANDLE hVarServer = pState->hVarServer;
-        VarDef vars[] =
+        for ( i=0 ; i < pState->varCount ; i++ )
         {
-            { pState->verboseVarName,
-              VARFLAG_NONE,
-              VARTYPE_UINT16,
-              0,
-              NOTIFY_MODIFIED,
-              &(pState->hVerbose ),
-              (void *)&(pState->verbose) },
-
-            { pState->triggerVarName,
-              VARFLAG_VOLATILE | VARFLAG_TRIGGER,
-              VARTYPE_UINT16,
-              0,
-              NOTIFY_MODIFIED,
-              &(pState->hTrigger ),
-              NULL },
-
-            { pState->txRateVarName,
-              VARFLAG_NONE,
-              VARTYPE_UINT32,
-              0,
-              NOTIFY_MODIFIED,
-              &(pState->hTxRate),
-              (void *)&(pState->txrate_s) },
-
-            { pState->enableVarName,
-              VARFLAG_NONE,
-              VARTYPE_UINT16,
-              0,
-              NOTIFY_MODIFIED,
-              &(pState->hEnable),
-              (void *)(&pState->enable) },
-
-            { pState->interfaceVarName,
-              VARFLAG_NONE,
-              VARTYPE_STR,
-              INTERFACE_LIST_LEN,
-              NOTIFY_MODIFIED,
-              &(pState->hInterfaceList),
-              (void *)(&pState->interfaceList) },
-
-            { pState->portVarName,
-              VARFLAG_NONE,
-              VARTYPE_UINT16,
-              0,
-              NOTIFY_MODIFIED,
-              &(pState->hPort),
-              (void *)(&pState->port) },
-
-            { pState->metricsVarName,
-              VARFLAG_NONE,
-              VARTYPE_UINT16,
-              0,
-              NOTIFY_PRINT,
-              &(pState->hMetrics),
-              (void *)(&pState->metrics) }
-        };
-
-        n = sizeof( vars ) / sizeof( vars[0] );
-
-        for ( i=0 ; i < n ; i++ )
-        {
-            if ( vars[i].name != NULL )
+            pVarDef = pState->pVarDef;
+            if ( *(pVarDef[i].name) != NULL )
             {
                 /* get a pointer to the location to store the variable handle */
-                pVarHandle = vars[i].pVarHandle;
+                pVarHandle = pVarDef[i].pVarHandle;
                 if ( pVarHandle != NULL )
                 {
                     /* create a message variable */
                     *pVarHandle = SetupVar( hVarServer,
-                                            vars[i].name,
-                                            vars[i].type,
-                                            vars[i].len,
-                                            vars[i].flags,
-                                            vars[i].notifyType );
+                                            *pVarDef[i].name,
+                                            pVarDef[i].type,
+                                            pVarDef[i].len,
+                                            pVarDef[i].flags,
+                                            pVarDef[i].notifyType );
                     if ( *pVarHandle == VAR_INVALID )
                     {
                         fprintf( stderr,
                                  "Error creating variable: %s\n",
-                                 vars[i].name );
+                                 *pVarDef[i].name );
                         errcount++;
+                    }
+                    else
+                    {
+                        GetVar( hVarServer, &pVarDef[i] );
                     }
                 }
             }
@@ -638,6 +665,7 @@ VAR_HANDLE SetupVar( VARSERVER_HANDLE hVarServer,
     VarInfo info;
     int result;
     size_t l;
+    VarType vartype = VARTYPE_INVALID;
 
     if ( name != NULL )
     {
@@ -665,24 +693,100 @@ VAR_HANDLE SetupVar( VARSERVER_HANDLE hVarServer,
             {
                 /* search for the variable which may have been pre-created */
                 hVar = VAR_FindByName( hVarServer, info.name );
+                if ( hVar != VAR_INVALID )
+                {
+                    result = VAR_GetType( hVarServer, hVar, &vartype );
+                    if ( result == EOK )
+                    {
+                        result = ( vartype == type ) ? EOK : ENOTSUP;
+                    }
+                }
             }
 
-            if ( ( hVar != VAR_INVALID ) &&
-                    ( notify != NOTIFY_NONE ) )
+            if ( result == EOK )
             {
-                /* set up variable notification */
-                result = VAR_Notify( hVarServer, hVar, notify );
-                if ( result != EOK )
+                if ( ( hVar != VAR_INVALID ) &&
+                     ( notify != NOTIFY_NONE ) )
                 {
-                    fprintf( stderr,
-                             "VARMSG: Failed to set up notification for '%s'\n",
-                             info.name );
+                    /* set up variable notification */
+                    result = VAR_Notify( hVarServer, hVar, notify );
+                    if ( result != EOK )
+                    {
+                        fprintf( stderr,
+                                "UDPT: Failed to set up notification for '%s'\n",
+                                info.name );
+                    }
                 }
             }
         }
     }
 
     return hVar;
+}
+
+/*============================================================================*/
+/*  GetVar                                                                    */
+/*!
+    Get the value of a varserver variable
+
+    The GetVar function copies the value of a varserver variable
+    into its local value within the UDPTState object.
+
+@param[in]
+    hVarServer
+        handle to the variable server
+
+@param[in]
+    pVarDef
+        pointer to a variable definition that maps the variable handle
+        to its local data storage.
+
+==============================================================================*/
+static int GetVar( VARSERVER_HANDLE hVarServer, VarDef *pVarDef )
+{
+    int result = EINVAL;
+    VarObject obj;
+    VAR_HANDLE hVar;
+
+    if ( pVarDef != NULL )
+    {
+        hVar = *(pVarDef->pVarHandle);
+        if ( ( hVar != VAR_INVALID ) &&
+             ( pVarDef->pVal != NULL ) )
+        {
+            if ( pVarDef->type == VARTYPE_STR )
+            {
+                obj.len = pVarDef->len;
+                obj.val.str = (char *)pVarDef->pVal;
+            }
+
+            result = VAR_Get( hVarServer, hVar, &obj );
+            if ( result == EOK )
+            {
+                switch( pVarDef->type )
+                {
+                    case VARTYPE_UINT16:
+                        *(uint16_t *)(pVarDef->pVal) = obj.val.ui;
+                        break;
+
+                    case VARTYPE_UINT32:
+                        *(uint32_t *)(pVarDef->pVal) = obj.val.ul;
+                        break;
+
+                    default:
+                        result = ENOTSUP;
+                        break;
+                }
+            }
+        }
+        else
+        {
+            /* no variable handle or local data reference */
+            result = ENOENT;
+        }
+    }
+
+    return result;
 }
 
 /*============================================================================*/
@@ -803,7 +907,14 @@ static int ProcessTimer( UDPTState *pState )
 
     if ( pState != NULL )
     {
-        result = ProcessTemplate( pState );
+        if ( pState->enable == true )
+        {
+            result = ProcessTemplate( pState );
+        }
+        else
+        {
+            result = EOK;
+        }
     }
 
     return result;
@@ -832,21 +943,38 @@ static int ProcessModified( UDPTState *pState, VAR_HANDLE hVar )
 {
     VarObject obj;
     int result = EINVAL;
+    VarDef *pVarDef;
+    int i;
+    VAR_HANDLE hRefVar;
 
     if ( pState != NULL )
     {
-        result = ENOTSUP;
-        if ( hVar == pState->hTrigger )
+        pVarDef = pState->pVarDef;
+
+        if ( pVarDef != NULL )
         {
-            result = ProcessTemplate( pState );
-        }
-        else if ( hVar == pState->hEnable )
-        {
-            /* get the value of the enable variable */
-            result = VAR_Get( pState->hVarServer, hVar, &obj );
-            if ( result == EOK )
+            result = ENOENT;
+            for(i=0;i<pState->varCount;i++)
             {
-                pState->enable = ( obj.val.ul == 0 ) ? false : true;
+                pVarDef = &pState->pVarDef[i];
+                if ( pVarDef->pVarHandle != NULL )
+                {
+                    hRefVar = *(pVarDef->pVarHandle);
+                    if ( hVar == hRefVar )
+                    {
+                        /* get the variable value */
+                        GetVar( pState->hVarServer, pVarDef );
+                        if ( pVarDef->cb != NULL )
+                        {
+                            /* invoke the var change callback */
+                            result = pVarDef->cb( pState );
+                        }
+                    }
+                    else
+                    {
+                        result = ENOTSUP;
+                    }
+                }
             }
         }
     }
@@ -1020,8 +1148,7 @@ static int PrintUDPTInfo( VAR_HANDLE hVar, UDPTState *pState, int fd )
 
     if ( pState != NULL )
     {
-        result = ENOENT;
-
+        result = DumpStats( pState, fd );
     }
 
     return result;
@@ -1053,6 +1180,7 @@ static int SendOutput( UDPTState *pState )
     int s;
     char host[NI_MAXHOST];
     int rc;
+    char *pName;
 
     if ( pState != NULL )
     {
@@ -1074,9 +1202,23 @@ static int SendOutput( UDPTState *pState )
                     if ( ( family == AF_INET ) ||
                          ( family == AF_INET6 ) )
                     {
+                        /* check against the interface allow list */
+                        if ( strlen( pState->interfaceList ) > 0 )
+                        {
+                            pName = strstr( pState->interfaceList,
+                                            ifa->ifa_name );
+                            if ( pName == NULL )
+                            {
+                                /* not sending on this interface */
+                                printf("not sending on %s\n", ifa->ifa_name );
+                                continue;
+                            }
+                        }
+
                         /* send out a UDP message */
                         rc = SendUDP( family,
                                       ifa->ifa_broadaddr,
+                                      pState->port,
                                       pMsg,
                                       strlen( pMsg ) );
                     }
@@ -1114,6 +1256,10 @@ static int SendOutput( UDPTState *pState )
             output inet address
 
     @param[in]
+        port
+            output port
+
+    @param[in]
         pMsg
             pointer to the message to send
 
@@ -1128,6 +1274,7 @@ static int SendOutput( UDPTState *pState )
 ==============================================================================*/
 static int SendUDP( int family,
                     struct sockaddr *pSockAddr,
+                    int port,
                     char *pMsg,
                     size_t len )
 {
@@ -1135,11 +1282,13 @@ static int SendUDP( int family,
     int fd;
     int broadcast = 1;
     int rc;
-    socklen_t addrlen = (family == AF_INET) ? sizeof(struct sockaddr_in)
-                                            :  sizeof(struct sockaddr_in6);
+    struct sockaddr_in broadcast_addr4;
+    struct sockaddr_in6 broadcast_addr6;
+    char buf[BUFSIZ];
 
     if ( ( pMsg != NULL ) &&
-         ( pSockAddr != NULL ) )
+         ( pSockAddr != NULL ) &&
+         ( port != 0 ))
     {
         /* open a UDP socket */
         fd = socket( family, SOCK_DGRAM, 0 );
@@ -1152,8 +1301,51 @@ static int SendUDP( int family,
                              &broadcast,
                              sizeof(broadcast)) != -1 )
             {
-                /* send out the packet */
-                result = sendto( fd, pMsg, len, 0, pSockAddr, addrlen );
+                switch( family )
+                {
+                    case AF_INET:
+                        broadcast_addr4.sin_family = AF_INET;
+                        broadcast_addr4.sin_port = htons(port);
+                        broadcast_addr4.sin_addr =
+                                    ((struct sockaddr_in *)pSockAddr)->sin_addr;
+
+                        printf("Sending on port %s:%d: %s\n",
+                            inet_ntop( AF_INET,
+                                       &broadcast_addr4.sin_addr,
+                                       buf,
+                                       sizeof(buf)),
+                                       port,
+                                       pMsg );
+
+                        /* send out the packet */
+                        result = sendto( fd,
+                                        pMsg,
+                                        len,
+                                        0,
+                                        &broadcast_addr4,
+                                        sizeof( struct sockaddr_in) );
+                        printf("result = %d\n", result);
+                        break;
+
+                    case AF_INET6:
+                        broadcast_addr6.sin6_family = AF_INET6;
+                        broadcast_addr6.sin6_port = port;
+                        broadcast_addr6.sin6_addr =
+                                ((struct sockaddr_in6 *)pSockAddr)->sin6_addr;
+
+                        /* send out the packet */
+                        result = sendto( fd,
+                                        pMsg,
+                                        len,
+                                        0,
+                                        &broadcast_addr6,
+                                        sizeof( struct sockaddr_in6) );
+
+                        break;
+
+                    default:
+                        result = ENOTSUP;
+                }
             }
             else
             {
@@ -1198,15 +1390,18 @@ static int DumpStats( UDPTState *pState, int fd )
     time_t duration;
 
     /* write the opening brace */
-    Output( fd, "{", 1 );
+    dprintf( fd, "{" );
 
     if ( pState != NULL )
     {
+        dprintf( fd, "\"enabled\": \"%s\",", pState->enable ? "yes" : "no" );
+        dprintf( fd, "\"port\": %d, ", pState->port );
+        dprintf( fd, "\"interfaces\":, \"%s\" ", pState->interfaceList );
         result = EOK;
     }
 
     /* write the closing brace */
-    Output( fd, "}", 1 );
+    dprintf(fd, "}" );
 
     return result;
 }
@@ -1246,6 +1441,38 @@ static void Output( int fd, char *buf, size_t len )
             fprintf( stderr, "write failed\n" );
         }
     }
+}
+
+/*============================================================================*/
+/*  cbTrigger                                                                 */
+/*!
+    Trigger callback
+
+    The cbTrigger function is invoked when the hTrigger variable changes.
+    It causes an on-demand UDP packet broadcast
+
+    @param[in]
+        pState
+            pointer to the UDPTState object
+
+==============================================================================*/
+static int cbTrigger( UDPTState *pState )
+{
+    int result = EINVAL;
+
+    if ( pState != NULL )
+    {
+        if ( pState->enable == true )
+        {
+            result = ProcessTemplate( pState );
+        }
+        else
+        {
+            result = EOK;
+        }
+    }
+
+    return result;
 }
 
 /*! @}
