@@ -64,6 +64,7 @@ SOFTWARE.
 #include <netdb.h>
 #include <linux/if_link.h>
 #include <sys/mman.h>
+#include <signal.h>
 #include <time.h>
 #include <varserver/varserver.h>
 #include <varserver/vartemplate.h>
@@ -163,6 +164,18 @@ typedef struct _udptState
     /*! Variable output file descriptor */
     int varFd;
 
+    /*! interval timer for UDP broadcast */
+    timer_t timer;
+
+    /*! interval timer pointer */
+    timer_t *timerID;
+
+    /*! transmission counter */
+    uint32_t txcount;
+
+    /*! transmission error counter */
+    uint32_t errcount;
+
 } UDPTState;
 
 /*! Var Definition object to define a message variable to be created */
@@ -217,6 +230,7 @@ VAR_HANDLE SetupVar( VARSERVER_HANDLE hVarServer,
                      size_t len,
                      uint32_t flags,
                      NotificationType notify );
+static int SetupTimer( UDPTState *pState );
 static int GetVar( VARSERVER_HANDLE hVarServer, VarDef *pVarDef );
 static int SetupVarFP( UDPTState *pState );
 static void RunMessageHandler( UDPTState *pState );
@@ -234,6 +248,7 @@ static int PrintUDPTInfo( VAR_HANDLE hVar, UDPTState *pState, int fd );
 static int DumpStats( UDPTState *pState, int fd );
 static void Output( int fd, char *buf, size_t len );
 static int cbTrigger( UDPTState *pState );
+static int cbTimer( UDPTState *pState );
 
 /*==============================================================================
         Private function definitions
@@ -289,7 +304,7 @@ int main(int argc, char **argv)
             NOTIFY_MODIFIED,
             &(state.hTxRate),
             (void *)&(state.txrate_s),
-            NULL },
+            cbTimer },
 
         {   &state.enableVarName,
             VARFLAG_NONE,
@@ -345,14 +360,33 @@ int main(int argc, char **argv)
     state.hVarServer = VARSERVER_Open();
     if( state.hVarServer != NULL )
     {
+        /* set up shared memory file pointer to perform stream to buffer ops */
         result = SetupVarFP( &state );
         if ( result == EOK )
         {
+            /* Set up varserver variables to control the UDP Template engine */
             result = SetupVars( &state );
             if ( result == EOK )
             {
-                RunMessageHandler( &state );
+                /* Set up timer for periodic UDP broadcast */
+                result = SetupTimer( &state );
+                if ( result == EOK )
+                {
+                    RunMessageHandler( &state );
+                }
+                else
+                {
+                    fprintf(stderr, "Failed to setup timer\n");
+                }
             }
+            else
+            {
+                fprintf(stderr, "Failed to setup vars\n");
+            }
+        }
+        else
+        {
+            fprintf(stderr, "Failed to setup VarFP\n");
         }
 
         /* close the handle to the variable server */
@@ -842,6 +876,72 @@ static int SetupVarFP( UDPTState *pState )
 }
 
 /*============================================================================*/
+/*  SetupTimer                                                                */
+/*!
+    Set up a timer
+
+    The SetupTimer function sets up a timer to periodically broadcast
+    the rendered UDP template.
+
+    @param[in]
+        pState
+            Pointer to the UDPTState object containing the timer
+
+    @retval EOK timer set up ok
+    @retval other error from timer_create or timer_settime
+
+==============================================================================*/
+static int SetupTimer( UDPTState *pState )
+{
+    struct sigevent te;
+    struct itimerspec its;
+    time_t secs;
+    int result = EINVAL;
+    static timer_t timer = 0;
+    int rc;
+
+    if ( pState != NULL )
+    {
+        if ( pState->txrate_s != 0 )
+        {
+            if ( pState->timerID != NULL )
+            {
+                timer_delete( *(pState->timerID));
+            }
+
+            secs = pState->txrate_s;
+            pState->timerID = &pState->timer;
+
+            /* Set and enable alarm */
+            te.sigev_notify = SIGEV_SIGNAL;
+            te.sigev_signo = SIG_VAR_TIMER;
+            te.sigev_value.sival_int = 1;
+            rc = timer_create(CLOCK_REALTIME, &te, pState->timerID);
+            if ( rc == 0 )
+            {
+                its.it_interval.tv_sec = secs;
+                its.it_interval.tv_nsec = 0;
+                its.it_value.tv_sec = secs;
+                its.it_value.tv_nsec = 0;
+                rc = timer_settime(*(pState->timerID), 0, &its, NULL);
+                result = ( rc == 0 ) ? EOK : errno;
+            }
+            else
+            {
+                result = errno;
+            }
+        }
+        else
+        {
+            /* no timer set */
+            result = EOK;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
 /*  RunMessageHandler                                                         */
 /*!
     Run the message handler loop
@@ -1210,7 +1310,6 @@ static int SendOutput( UDPTState *pState )
                             if ( pName == NULL )
                             {
                                 /* not sending on this interface */
-                                printf("not sending on %s\n", ifa->ifa_name );
                                 continue;
                             }
                         }
@@ -1221,6 +1320,14 @@ static int SendOutput( UDPTState *pState )
                                       pState->port,
                                       pMsg,
                                       strlen( pMsg ) );
+                        if ( rc == EOK )
+                        {
+                            pState->txcount++;
+                        }
+                        else
+                        {
+                            pState->errcount++;
+                        }
                     }
                 }
 
@@ -1309,22 +1416,17 @@ static int SendUDP( int family,
                         broadcast_addr4.sin_addr =
                                     ((struct sockaddr_in *)pSockAddr)->sin_addr;
 
-                        printf("Sending on port %s:%d: %s\n",
-                            inet_ntop( AF_INET,
-                                       &broadcast_addr4.sin_addr,
-                                       buf,
-                                       sizeof(buf)),
-                                       port,
-                                       pMsg );
-
                         /* send out the packet */
-                        result = sendto( fd,
+                        rc = sendto( fd,
                                         pMsg,
                                         len,
                                         0,
                                         &broadcast_addr4,
                                         sizeof( struct sockaddr_in) );
-                        printf("result = %d\n", result);
+                        if ( result != -1 )
+                        {
+                            result = EOK;
+                        }
                         break;
 
                     case AF_INET6:
@@ -1340,7 +1442,10 @@ static int SendUDP( int family,
                                         0,
                                         &broadcast_addr6,
                                         sizeof( struct sockaddr_in6) );
-
+                        if ( result != -1 )
+                        {
+                            result = EOK;
+                        }
                         break;
 
                     default:
@@ -1396,6 +1501,9 @@ static int DumpStats( UDPTState *pState, int fd )
     {
         dprintf( fd, "\"enabled\": \"%s\",", pState->enable ? "yes" : "no" );
         dprintf( fd, "\"port\": %d, ", pState->port );
+        dprintf( fd, "\"txrate\": %d, ", pState->txrate_s );
+        dprintf( fd, "\"txcount\": %d, ", pState->txcount );
+        dprintf( fd, "\"errcount\": %d, ", pState->errcount );
         dprintf( fd, "\"interfaces\":, \"%s\" ", pState->interfaceList );
         result = EOK;
     }
@@ -1470,6 +1578,31 @@ static int cbTrigger( UDPTState *pState )
         {
             result = EOK;
         }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  cbTrigger                                                                 */
+/*!
+    Trigger callback
+
+    The cbTrigger function is invoked when the hTrigger variable changes.
+    It causes an on-demand UDP packet broadcast
+
+    @param[in]
+        pState
+            pointer to the UDPTState object
+
+==============================================================================*/
+static int cbTimer( UDPTState *pState )
+{
+    int result = EINVAL;
+
+    if ( pState != NULL )
+    {
+        result = SetupTimer( pState );
     }
 
     return result;
