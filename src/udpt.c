@@ -62,6 +62,7 @@ SOFTWARE.
 #include <netinet/in.h>
 #include <ifaddrs.h>
 #include <netdb.h>
+#include <net/if.h>
 #include <linux/if_link.h>
 #include <sys/mman.h>
 #include <signal.h>
@@ -262,8 +263,9 @@ static int ProcessTimer( UDPTState *pState );
 static int ProcessTemplate( UDPTState *pState );
 static int UpdateInterfaceIP( UDPTState *pState, struct ifaddrs *ifa );
 static int SendOutput( UDPTState *pState );
+static int BindInterface( int s, struct ifaddrs *ifa );
 static int SendUDP( int family,
-                    struct sockaddr *pSockAddr,
+                    struct ifaddrs *ifa,
                     int port,
                     char *pMsg,
                     size_t len );
@@ -1368,7 +1370,7 @@ static int SendOutput( UDPTState *pState )
                         {
                             /* send out a UDP message */
                             rc = SendUDP( family,
-                                        ifa->ifa_broadaddr,
+                                        ifa,
                                         pState->port,
                                         pMsg,
                                         strlen( pMsg ) );
@@ -1507,7 +1509,7 @@ static int UpdateInterfaceIP( UDPTState *pState, struct ifaddrs *ifa )
 
 ==============================================================================*/
 static int SendUDP( int family,
-                    struct sockaddr *pSockAddr,
+                    struct ifaddrs *ifa,
                     int port,
                     char *pMsg,
                     size_t len )
@@ -1516,18 +1518,31 @@ static int SendUDP( int family,
     int fd;
     int broadcast = 1;
     int rc;
+    int addrsize = (family==AF_INET6)
+                 ? sizeof(struct sockaddr_in6)
+                 : sizeof(struct sockaddr_in);
     struct sockaddr_in broadcast_addr4;
     struct sockaddr_in6 broadcast_addr6;
+    struct sockaddr *pSockAddr;
+
     char buf[BUFSIZ];
 
     if ( ( pMsg != NULL ) &&
-         ( pSockAddr != NULL ) &&
+         ( ifa != NULL ) &&
+         ( ifa->ifa_broadaddr != NULL ) &&
+         ( ifa->ifa_addr != NULL ) &&
          ( port != 0 ))
     {
+
+        pSockAddr = ifa->ifa_broadaddr;
+
         /* open a UDP socket */
         fd = socket( family, SOCK_DGRAM, 0 );
         if ( fd > 0 )
         {
+            /* bind the UDP output to a specific interface */
+            BindInterface( fd, ifa );
+
             /* set up socket to broadcast */
             if ( setsockopt( fd,
                              SOL_SOCKET,
@@ -1590,6 +1605,65 @@ static int SendUDP( int family,
         {
             result = errno;
         }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  BindInterface                                                             */
+/*!
+    Bind a socket to a specific interface
+
+    The BindInterface function binds a socket to a specific interface so that
+    any output on that socket is sent only on the specifically bound interface.
+    This function is platform specific and currently only implemented for
+    Linux.
+
+    @param[in]
+        s
+            interface family
+
+    @param[in]
+        ifa
+            pointer to the interface address info
+
+    @retval EOK output generated ok
+    @retval EINVAL invalid arguments
+    @retval other error from socket, setsockopt, sendto
+
+==============================================================================*/
+static int BindInterface( int s, struct ifaddrs *ifa )
+{
+    int result = EINVAL;
+
+    if ( ( s > 0 ) &&
+         ( ifa != NULL ) &&
+         ( ifa->ifa_name != NULL ) )
+    {
+#ifdef __linux__
+        struct ifreq ifr;
+        int rc;
+
+        memset(&ifr, 0, sizeof(ifr));
+        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifa->ifa_name);
+
+        rc = setsockopt( s,
+                         SOL_SOCKET,
+                         SO_BINDTODEVICE,
+                         (void *)&ifr,
+                         sizeof(ifr) );
+        if ( rc == 0 )
+        {
+            result = EOK;
+        }
+        else
+        {
+            result = errno;
+        }
+#else
+        result = ENOTSUP;
+#endif
     }
 
     return result;
