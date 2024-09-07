@@ -264,6 +264,7 @@ static int ProcessTemplate( UDPTState *pState );
 static int UpdateInterfaceIP( UDPTState *pState, struct ifaddrs *ifa );
 static int SendOutput( UDPTState *pState );
 static int BindInterface( int s, struct ifaddrs *ifa );
+static bool CheckInterface( const char *interfaces, const char *interface );
 static int SendUDP( int family,
                     struct ifaddrs *ifa,
                     int port,
@@ -1326,13 +1327,15 @@ static int SendOutput( UDPTState *pState )
     struct ifaddrs *ifa;
     int family;
     int rc;
-    char *pName;
 
     if ( pState != NULL )
     {
         /* get a list of the output interfaces */
         if ( getifaddrs(&addrs) == 0 )
         {
+            /* default result if no interface was found to send on */
+            result = ENOENT;
+
             ifa = addrs;
             for ( ifa = addrs; ifa != NULL; ifa = ifa->ifa_next )
             {
@@ -1346,15 +1349,11 @@ static int SendOutput( UDPTState *pState )
                      ( family == AF_INET6 ) )
                 {
                     /* check against the interface allow list */
-                    if ( strlen( pState->interfaceList ) > 0 )
+                    if ( CheckInterface( pState->interfaceList,
+                                         ifa->ifa_name ) == false )
                     {
-                        pName = strstr( pState->interfaceList,
-                                        ifa->ifa_name );
-                        if ( pName == NULL )
-                        {
-                            /* not sending on this interface */
-                            continue;
-                        }
+                        /* not sending on this interface */
+                        continue;
                     }
 
                     /* update the interface we are processing */
@@ -1667,6 +1666,70 @@ static int BindInterface( int s, struct ifaddrs *ifa )
     }
 
     return result;
+}
+
+/*============================================================================*/
+/*  CheckInterface                                                            */
+/*!
+    Check if we can send a packet on the specified interface
+
+    The CheckInterface function checks if we are allowed to send a packet
+    on the specified interface.  There are two conditions where sending is
+    allowed:
+
+    1.  The interfaces list is empty
+    2.  The interface name is found in the comma separated interface list
+
+    @param[in]
+        interfaces
+            pointer to a comma separated string of interface names
+
+    @param[in]
+        interface
+            the name of the interface we are checking for
+
+    @retval true - we are allowed to send on the specified interface
+    @retval false - we are not allowed to send on the specified interface
+
+==============================================================================*/
+static bool CheckInterface( const char *interfaces, const char *interface )
+{
+    char interfaceList[INTERFACE_LIST_LEN];
+    char *saveptr = NULL;
+    char *token;
+    bool sendOK = false;
+
+    if ( ( interfaces != NULL ) &&
+         ( interface != NULL ) )
+    {
+        if ( strlen( interfaces ) == 0 )
+        {
+            /* we are allowed to send on any interface if the interfaces
+               list is empty */
+            sendOK = true;
+        }
+        else
+        {
+            /* make a mutable copy of the interface list */
+            strcpy( interfaceList, interfaces );
+
+            /* check if the interface is in the interface list */
+            for (token = strtok_r(interfaceList, ",", &saveptr);
+                token != NULL;
+                token = strtok_r(NULL, ",", &saveptr))
+            {
+                /* check if we have an interface name match */
+                if ( strcmp( token, interface ) == 0 )
+                {
+                    /* we have a match - it is ok to send on this interface */
+                    sendOK = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    return sendOK;
 }
 
 /*============================================================================*/
