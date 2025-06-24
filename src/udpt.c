@@ -48,6 +48,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -144,7 +145,7 @@ typedef struct _udptState
     VAR_HANDLE hEnable;
 
     /*! enable/disable */
-    bool enable;
+    uint16_t enable;
 
     /*! interface variable name */
     char *interfaceVarName;
@@ -276,6 +277,7 @@ static int DumpStats( UDPTState *pState, int fd );
 static void Output( int fd, char *buf, size_t len );
 static int cbTrigger( UDPTState *pState );
 static int cbTimer( UDPTState *pState );
+static void DebugOut(const char *fmt, ...);
 
 /*==============================================================================
         Private function definitions
@@ -509,7 +511,7 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvf:p:i:e:r:t:m:a:";
+    const char *options = "hv:f:p:i:e:r:t:m:a:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
@@ -1056,14 +1058,18 @@ static int ProcessTimer( UDPTState *pState )
 {
     int result = EINVAL;
 
+    DebugOut("[udpt] Timer callback invoked.\n");
+
     if ( pState != NULL )
     {
         if ( pState->enable == true )
         {
+            DebugOut("[udpt] Timer: Sending output.\n");
             result = SendOutput( pState );
         }
         else
         {
+            DebugOut("[udpt] Timer: Not enabled, skipping send.\n");
             result = EOK;
         }
     }
@@ -1832,14 +1838,18 @@ static int cbTrigger( UDPTState *pState )
 {
     int result = EINVAL;
 
+    DebugOut("[udpt] Trigger callback invoked.\n");
+
     if ( pState != NULL )
     {
         if ( pState->enable == true )
         {
+            DebugOut("[udpt] Trigger: Sending output.\n");
             result = SendOutput( pState );
         }
         else
         {
+            DebugOut("[udpt] Trigger: Not enabled, skipping send.\n");
             result = EOK;
         }
     }
@@ -1870,6 +1880,31 @@ static int cbTimer( UDPTState *pState )
     }
 
     return result;
+}
+
+/*============================================================================*/
+/*  DebugOut                                                                  */
+/*!
+    Debug output to stdout if state.verbose is set
+
+    The DebugOut function prints a formatted debug message to stdout only if
+    the verbose flag in the global state is set.
+
+    @param[in]
+        fmt
+            printf-style format string
+    @param[in]
+        ...
+            variable arguments for formatting
+==============================================================================*/
+static void DebugOut(const char *fmt, ...)
+{
+    if (state.verbose) {
+        va_list args;
+        va_start(args, fmt);
+        vprintf(fmt, args);
+        va_end(args);
+    }
 }
 
 /*! @}
