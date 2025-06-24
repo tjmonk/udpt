@@ -144,7 +144,7 @@ typedef struct _udptState
     VAR_HANDLE hEnable;
 
     /*! enable/disable */
-    bool enable;
+    uint16_t enable;
 
     /*! interface variable name */
     char *interfaceVarName;
