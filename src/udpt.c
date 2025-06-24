@@ -509,7 +509,7 @@ static int ProcessOptions( int argC, char *argV[], UDPTState *pState )
 {
     int c;
     int result = EINVAL;
-    const char *options = "hvf:p:i:e:r:t:m:a:";
+    const char *options = "hv:f:p:i:e:r:t:m:a:";
 
     if( ( pState != NULL ) &&
         ( argV != NULL ) )
